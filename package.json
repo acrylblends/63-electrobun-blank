@@ -25,7 +25,8 @@
     "predev": "node scripts/check-node.cjs",
     "prestart": "node scripts/check-node.cjs",
     "pretest": "node scripts/check-node.cjs",
-    "precheck": "node scripts/check-node.cjs"
+    "precheck": "node scripts/check-node.cjs",
+    "electrobun": "ACRYL_APP_ROOT=\"$PWD\" electrobun dev"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.5",
@@ -56,6 +57,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "electron": "44.9.3",
-    "ws": "8.21.3"
+    "ws": "8.21.3",
+    "electrobun": "2.0.6"
   }
 }
