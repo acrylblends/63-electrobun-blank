@@ -155,11 +155,40 @@ const built = join(dist, 'electrobun-build')
 const listing = readdirSync(artifacts)
 log(`artifacts: ${listing.join(', ')}`)
 
-/** The bytes a .tar.zst unpacks to: what the app writes on its first start (Electrobun ships the app compressed and extracts it once). */
+/**
+ * What the app is once unpacked (Electrobun ships it as a .tar.zst and extracts it on the first start): the sum of its file sizes and the number of
+ * files, read from the tar headers, so it is measured by the same rule as the Electron side (bytes() above), without tar's own headers and padding.
+ */
 async function unpackedBytes(file) {
   let total = 0
-  for await (const chunk of createReadStream(file).pipe(createZstdDecompress())) total += chunk.length
-  return total
+  let files = 0
+  let skip = 0
+  let held = Buffer.alloc(0)
+  for await (const chunk of createReadStream(file).pipe(createZstdDecompress())) {
+    held = held.length === 0 ? chunk : Buffer.concat([held, chunk])
+    let at = 0
+    while (true) {
+      if (skip > 0) {
+        const step = Math.min(skip, held.length - at)
+        skip -= step
+        at += step
+        if (skip > 0) break
+      }
+      if (held.length - at < 512) break
+      const header = held.subarray(at, at + 512)
+      at += 512
+      if (header.every((b) => b === 0)) continue
+      const size = Number.parseInt(header.subarray(124, 136).toString('latin1').replace(/\0.*$/su, '').trim() || '0', 8)
+      const type = String.fromCharCode(header[156])
+      if (type === '0' || type === '\0' || type === '7') {
+        total += size
+        files += 1
+      }
+      skip = Math.ceil(size / 512) * 512
+    }
+    held = held.subarray(at)
+  }
+  return { bytes: total, files }
 }
 const zst = []
 const findZst = (dir) => {
@@ -171,7 +200,8 @@ const findZst = (dir) => {
 }
 findZst(built)
 const wrapperBytes = bytes(built)
-const extractedBytes = zst.length === 0 ? 0 : await unpackedBytes(zst[0])
+const extracted = zst.length === 0 ? { bytes: 0, files: 0 } : await unpackedBytes(zst[0])
+const extractedBytes = extracted.bytes
 
 const name = `ACRYL-Blends-Electrobun-${OS}-${arch}`
 const shipped = []
@@ -190,6 +220,7 @@ const electrobun = {
   // What the installer puts down (a self-extractor holding the app compressed); on the first start it unpacks the app in its place.
   installerAppBytes: wrapperBytes,
   installedBytes: extractedBytes,
+  installedFiles: extracted.files,
   payloadBytes: stageBytes.payload,
   nodeBytes: stageBytes.node,
   gitBytes: stageBytes.git,
