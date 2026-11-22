@@ -21,8 +21,8 @@ export default {
     buildFolder: 'dist/electrobun-build',
     artifactFolder: 'dist/electrobun-artifacts',
     mac: { bundleCEF: false, icons: 'dist/electrobun-stage/icon.iconset' },
-    linux: { bundleCEF: false, icon: 'dist/electrobun-stage/icon.png' },
-    win: { bundleCEF: false, icon: 'dist/electrobun-stage/icon.png' },
+    linux: { bundleCEF: false, icon: 'electrobun/icon-256.png' },
+    win: { bundleCEF: false, icon: 'electrobun/icon-256.png' },
   },
   release: { updateAuthority: 'none', generatePatch: false },
 } satisfies ElectrobunConfig
