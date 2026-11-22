@@ -110,7 +110,8 @@ export function startFrameHost({ program, chosen, instance, runtime, vcsBin, pre
     join(shellLib, 'watch-host.mjs'),
     ...watched.map((p) => `--watch-path=${p}`),
     '--',
-    ...loaders.flatMap((l) => [preloadFlag, l]),
+    // Node's --import takes a URL (a Windows path like C:\... reads as the scheme c:); Bun's --preload takes a path.
+    ...loaders.flatMap((l) => [preloadFlag, preloadFlag === '--import' ? pathToFileURL(l).href : l]),
     join(program, 'scripts', 'ide-host.mjs'),
   ]
   let env = { ...process.env, ...instance.instanceEnv(chosen), ELECTRON_RUN_AS_NODE: '1', [instance.PROGRAM_ENV]: program, ...extraEnv }

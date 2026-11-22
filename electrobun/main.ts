@@ -98,12 +98,21 @@ for (const name of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const)
     void stopHost().then(() => process.exit(0))
   })
 
+// A host that fails to start keeps its watcher waiting for a file change, so `ready` never settles: give it a time limit and say why it stopped.
+const HOST_START_LIMIT_MS = 180_000
 let url: string
 try {
-  url = await host.ready
+  url = await Promise.race([
+    host.ready,
+    new Promise<never>((_, fail) =>
+      setTimeout(() => fail(new Error(`the frame host did not serve within ${HOST_START_LIMIT_MS / 1000} s:\n${host.output().slice(-1500)}`)), HOST_START_LIMIT_MS),
+    ),
+  ])
 } catch (error) {
-  console.error(`electrobun-blank: ${(error as Error).message}`)
+  const message = (error as Error).message
+  console.error(`electrobun-blank: ${message}`)
   await stopHost()
+  await Utils.showMessageBox({ type: 'error', title, message: `${title} cannot start`, detail: `${message.slice(-1200)}\n\nThe whole output is in ${logFile}`, buttons: ['Quit'] })
   process.exit(1)
 }
 console.log(`electrobun-blank: frame host ready after ${(performance.now() - started).toFixed(0)} ms`)

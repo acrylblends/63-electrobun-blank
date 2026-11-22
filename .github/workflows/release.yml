@@ -25,7 +25,8 @@ jobs:
       matrix:
         include:
           - { os: macos-15, platform: mac, arch: arm64 }
-          - { os: macos-15-intel, platform: mac, arch: x64 }
+          # No Intel Mac: Electrobun 2.0.7's DMG step fails on macos-15-intel ("hdiutil: create failed - No space left on device" inside the image,
+          # twice, with the runner's disk freed first). Electrobun names Apple silicon as its macOS platform.
           - { os: windows-latest, platform: win, arch: x64 }
           - { os: windows-11-arm, platform: win, arch: arm64 }
           - { os: ubuntu-24.04, platform: linux, arch: x64 }

@@ -11,7 +11,6 @@ From the [Latest release](https://github.com/acrylblends/63-electrobun-blank/rel
 | OS | Electrobun build | Electron build of the same app (for comparison) |
 | --- | --- | --- |
 | macOS (Apple silicon) | `ACRYL-Blends-Electrobun-mac-arm64.dmg` | `ACRYL-Blends-Electron-mac-arm64.dmg` |
-| macOS (Intel) | `ACRYL-Blends-Electrobun-mac-x64.dmg` | `ACRYL-Blends-Electron-mac-x64.dmg` |
 | Windows | `ACRYL-Blends-Electrobun-win-x64.*` | `ACRYL-Blends-Electron-win-x64.exe` |
 | Linux | `ACRYL-Blends-Electrobun-linux-x64.*` | `ACRYL-Blends-Electron-linux-x64.deb` |
 
