@@ -11,7 +11,7 @@
  * --out/sizes-<os>-<arch>.json. Sizes are apparent bytes (the sum of file sizes), MB = 1,000,000 bytes, the same rule on every OS.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createZstdDecompress } from 'node:zlib'
@@ -21,6 +21,9 @@ const args = process.argv.slice(2)
 const option = (name, fallback) => (args.includes(name) ? args[args.indexOf(name) + 1] : fallback)
 const blends = option('--blends', '1.7.25')
 const arch = option('--arch', process.arch)
+const host = option('--host', 'bun')
+if (host !== 'bun' && host !== 'node') throw new Error(`--host ${host}: bun or node`)
+const appVersion = process.env.ELECTROBUN_APP_VERSION ?? JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')).version
 const out = resolve(option('--out', join(repo, 'dist', 'release')))
 const OS = { darwin: 'mac', win32: 'win', linux: 'linux' }[process.platform]
 const win = process.platform === 'win32'
@@ -91,9 +94,22 @@ log(`Electron: installer ${mb(electron.installerBytes)} MB, installed ${mb(elect
 
 // 2. The Electrobun stage: the same Program, the Node that runs this script (the official build setup-node or nvm installed), Git on macOS, icons.
 rmSync(stage, { recursive: true, force: true })
-mkdirSync(join(stage, 'node'), { recursive: true })
+mkdirSync(stage, { recursive: true })
 cpSync(join(unpacked.resources, 'app'), join(stage, 'payload'), { recursive: true, verbatimSymlinks: true })
-copyFileSync(process.execPath, join(stage, 'node', win ? 'node.exe' : 'node'))
+// --host bun (default): the frame host runs on Electrobun's own Bun and no Node ships. --host node: the Node that runs this script ships too.
+if (host === 'node') {
+  mkdirSync(join(stage, 'node'), { recursive: true })
+  copyFileSync(process.execPath, join(stage, 'node', win ? 'node.exe' : 'node'))
+}
+// The Blend's version is the release's, so the frame's top bar names the build (blend.yaml metadata.version).
+const blendYaml = join(stage, 'payload', 'blend.yaml')
+writeFileSync(blendYaml, readFileSync(blendYaml, 'utf8').replace(/^(metadata:\n(?:[ \t].*\n)*?[ \t]+version:[ \t]*).*$/mu, `$1${appVersion}`))
+// The person's app starts from the scaffold's repository (template-git becomes its .git): commit the version there, or the new app opens with
+// blend.yaml already "unsaved".
+const templateRepo = ['--git-dir', join(stage, 'payload', 'template-git'), '--work-tree', join(stage, 'payload')]
+const ident = ['-c', 'user.name=ACRYL Blends', '-c', 'user.email=build@acryldev.dev']
+execFileSync('git', [...templateRepo, 'add', 'blend.yaml'])
+execFileSync('git', [...ident, ...templateRepo, 'commit', '-q', '-m', `Blend version ${appVersion}`])
 if (existsSync(join(unpacked.resources, 'git'))) {
   cpSync(join(unpacked.resources, 'git'), join(stage, 'vcs'), { recursive: true, verbatimSymlinks: true })
   // Git's 148 builtin names (libexec/git-core/git-add -> git ...) are symlinks; Electrobun's copy follows them, so each became a 3.5 MB copy of git
@@ -171,7 +187,7 @@ const electrobun = {
   gitBytes: stageBytes.git,
 }
 electrobun.shellBytes = extractedBytes - stageBytes.payload - stageBytes.node - stageBytes.git
-const sizes = { os: OS, arch, blends, node: process.version, electron, electrobun, measured: new Date().toISOString() }
+const sizes = { os: OS, arch, blends, host, version: appVersion, node: host === 'node' ? process.version : undefined, electron, electrobun, measured: new Date().toISOString() }
 writeFileSync(join(out, `sizes-${OS}-${arch}.json`), `${JSON.stringify(sizes, null, 2)}\n`)
 log(`Electrobun: ${shipped.map((s) => `${s.file} ${mb(s.bytes)} MB`).join(', ')}; installed ${mb(electrobun.installedBytes)} MB after the first start (${mb(wrapperBytes)} MB before it)`)
 log(`sizes: ${join(out, `sizes-${OS}-${arch}.json`)}`)

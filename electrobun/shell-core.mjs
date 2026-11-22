@@ -5,7 +5,7 @@
  * Not copied: updater, door-shell (window-level door calls), menus, host restart supervisor.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -95,10 +95,40 @@ export async function openProduct({ program, vcsBin, version = '0.0.0-spike', lo
 }
 
 /**
+ * The frame host on Bun has no node:module registerHooks for the bundle overlay, so the Program is linked into the app's source instead: each
+ * Program entry the source lacks (node_modules, app/, frame/, scripts/, the library plugins, cordis.yml) becomes a link to the bundle's (a junction
+ * on Windows, where a file is copied), and the names go into git's local exclude so the person's `git status` does not show them. Plain
+ * resolution then finds everything, as in a one-folder app. Run on every start: an update of the app replaces the bundle the links point to.
+ */
+export function linkProgram(program, root, entries) {
+  const win = process.platform === 'win32'
+  const linked = []
+  for (const entry of entries) {
+    const name = entry.replace(/\/$/u, '')
+    const target = join(program, name)
+    const at = join(root, name)
+    if (existsSync(at) || !existsSync(target)) continue
+    mkdirSync(join(at, '..'), { recursive: true })
+    if (win && !statSync(target).isDirectory()) copyFileSync(target, at)
+    else symlinkSync(target, at, win ? 'junction' : undefined)
+    linked.push(name)
+  }
+  if (linked.length > 0 && existsSync(join(root, '.git'))) {
+    const info = join(root, '.git', 'info')
+    mkdirSync(info, { recursive: true })
+    const file = join(info, 'exclude')
+    const before = existsSync(file) ? readFileSync(file, 'utf8') : ''
+    const missing = linked.map((n) => `/${n}`).filter((n) => !before.split('\n').includes(n))
+    if (missing.length > 0) appendFileSync(file, `${before === '' || before.endsWith('\n') ? '' : '\n'}${missing.join('\n')}\n`)
+  }
+  return linked
+}
+
+/**
  * Start the frame host as the packed Electron shell does (watch-host -> runtime --import loader --import overlay ide-host.mjs), with any runtime.
  * `preloadFlag` is `--import` for Node and `--preload` for Bun; `preloads` replaces the default loader list (the precompile and Bun spikes change it).
  */
-export function startFrameHost({ program, chosen, instance, runtime, vcsBin, preloadFlag = '--import', preloads, extraEnv = {}, write = (t) => process.stdout.write(t) }) {
+export function startFrameHost({ program, chosen, instance, runtime, vcsBin, preloadFlag = '--import', preloads, runtimeArgs = [], hostScript, extraEnv = {}, write = (t) => process.stdout.write(t) }) {
   const root = chosen.root
   const shellLib = join(program, 'node_modules', '@acryldev', 'desktop-shell', 'lib')
   const loaders = preloads ?? [
@@ -110,9 +140,10 @@ export function startFrameHost({ program, chosen, instance, runtime, vcsBin, pre
     join(shellLib, 'watch-host.mjs'),
     ...watched.map((p) => `--watch-path=${p}`),
     '--',
+    ...runtimeArgs,
     // Node's --import takes a URL (a Windows path like C:\... reads as the scheme c:); Bun's --preload takes a path.
     ...loaders.flatMap((l) => [preloadFlag, preloadFlag === '--import' ? pathToFileURL(l).href : l]),
-    join(program, 'scripts', 'ide-host.mjs'),
+    hostScript ?? join(program, 'scripts', 'ide-host.mjs'),
   ]
   let env = { ...process.env, ...instance.instanceEnv(chosen), ELECTRON_RUN_AS_NODE: '1', [instance.PROGRAM_ENV]: program, ...extraEnv }
   const win = process.platform === 'win32'

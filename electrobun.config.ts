@@ -1,12 +1,13 @@
 // The installed app on Electrobun (`node electrobun/pack.mjs`): see electrobun/main.ts. Electrobun 2.0.7, Bun main process, system webview.
-// pack.mjs stages the Blank app's Program (the same files the Electron pack ships), Node and (macOS) Git under dist/electrobun-stage first.
+// pack.mjs stages the Blank app's Program (the same files the Electron pack ships), Node (--host node only) and (macOS) Git under dist/electrobun-stage first.
+import { existsSync } from 'node:fs'
 import type { ElectrobunConfig } from 'electrobun'
 
 export default {
   app: {
     name: 'ACRYL Blends Electrobun',
     identifier: 'io.github.acrylblends.electrobun-blank',
-    version: process.env.ELECTROBUN_APP_VERSION ?? '0.2.0',
+    version: process.env.ELECTROBUN_APP_VERSION ?? '0.2.1',
     description: 'The ACRYL Blends frame around an empty app, in an Electrobun window.',
   },
   runtime: { exitOnLastWindowClosed: true },
@@ -15,7 +16,8 @@ export default {
     bun: { entrypoint: 'electrobun/main.ts' },
     copy: {
       'dist/electrobun-stage/payload': 'payload',
-      'dist/electrobun-stage/node': 'node',
+      'electrobun/bun-node-hooks.mjs': 'bun-node-hooks.mjs',
+      ...(existsSync('dist/electrobun-stage/node') ? { 'dist/electrobun-stage/node': 'node' } : {}),
       ...(process.platform === 'darwin' ? { 'dist/electrobun-stage/vcs': 'vcs' } : {}),
     },
     buildFolder: 'dist/electrobun-build',

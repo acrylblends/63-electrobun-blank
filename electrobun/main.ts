@@ -4,18 +4,28 @@
  *
  * It does what @acryldev/desktop-shell's Electron main does for a packed product, with the same steps (electrobun/shell-core.mjs is a copy of them):
  * open the product's app in ~/.acryl (on the first start, make it from the bundled Blank app), start the frame host from the bundle (the Program),
- * and open one window on the address it prints. The frame host runs on the Node that ships inside the bundle (resources app/node), because the
- * framework loads plugins through node:module registerHooks, which Bun does not have. Closing the window stops the host.
+ * and open one window on the address it prints. The frame host runs on Electrobun's own Bun (default) or on a Node shipped in the bundle
+ * (`pack.mjs --host node`). Closing the window stops the host.
  */
 import Electrobun, { ApplicationMenu, BrowserWindow, Utils } from 'electrobun/main'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { openProduct, startFrameHost } from './shell-core.mjs'
+import { linkProgram, openProduct, startFrameHost } from './shell-core.mjs'
 
 // Electrobun starts the main process in the bundle's bin folder (macOS: Contents/MacOS); its resources are ../Resources (electrobun/main Paths.ts).
-const app = join(resolve('../Resources'), 'app')
+const resources = resolve('../Resources')
+const app = join(resources, 'app')
 const program = join(app, 'payload')
+// Which host: the bundled Node when the build ships one (`pack.mjs --host node`), else Electrobun's own Bun (`--host bun`, the default).
 const node = join(app, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
+const onBun = !existsSync(node)
+const version = (() => {
+  try {
+    return String(JSON.parse(readFileSync(join(resources, 'version.json'), 'utf8')).version)
+  } catch {
+    return '0.0.0'
+  }
+})()
 const vcs = join(app, 'vcs', 'bin')
 const vcsBin = existsSync(vcs) ? vcs : undefined
 // The bundled Git's builtin names travel as a list (electrobun/pack.mjs): make the links once, in the app Electrobun unpacked.
@@ -59,15 +69,26 @@ ApplicationMenu.setApplicationMenu([
 ])
 
 const started = performance.now()
-const { chosen, instance } = await openProduct({ program, vcsBin, version: '0.2.0' })
+const { chosen, instance, product } = await openProduct({ program, vcsBin, version })
 const logs = join(chosen.home, 'logs')
 mkdirSync(logs, { recursive: true })
 const logFile = join(logs, 'electrobun-host.log')
+// On Bun the Program is linked into the app's source (no registerHooks for the bundle overlay) and the host starts from there, with the
+// registerHooks shim (bun-node-hooks.mjs) first. --no-install: Bun must never fetch a missing package from its global cache.
+if (onBun) linkProgram(program, chosen.root, product.program)
 const host = startFrameHost({
   program,
   chosen,
   instance,
-  runtime: node,
+  runtime: onBun ? process.execPath : node,
+  ...(onBun
+    ? {
+        preloadFlag: '--preload',
+        runtimeArgs: ['--no-install', '--preserve-symlinks'],
+        preloads: [join(app, 'bun-node-hooks.mjs'), join(program, 'node_modules', '@acryldev', 'node-server', 'lib', 'register.js')],
+        hostScript: join(chosen.root, 'scripts', 'ide-host.mjs'),
+      }
+    : {}),
   vcsBin,
   write: (text: string) => {
     process.stdout.write(text)
