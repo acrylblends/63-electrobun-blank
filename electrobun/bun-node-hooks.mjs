@@ -88,7 +88,7 @@ Bun.plugin({
   name: 'acryl-node-hooks',
   setup(build) {
     // Only the four files that import it, and synchronously: an async onLoad makes the module async, and require() of it then fails (ajv's resolve.js).
-    build.onLoad({ filter: /(blends-frame\/lib\/app-generation|node-server\/(lib|src)\/register|instance\/lib\/bundle-overlay|plugins\/extensions\/resolve)\.(js|ts)$/u }, ({ path }) => {
+    build.onLoad({ filter: /(blends-frame[\\/]lib[\\/]app-generation|node-server[\\/](lib|src)[\\/]register|instance[\\/]lib[\\/]bundle-overlay|plugins[\\/]extensions[\\/]resolve)\.(js|ts)$/u }, ({ path }) => {
       const text = readFileSync(path, 'utf8')
       const loader = path.endsWith('.ts') ? 'ts' : 'js'
       // Bun's runtime onLoad must answer with an object: a file that does not import registerHooks goes back as it is.
@@ -100,7 +100,7 @@ Bun.plugin({
       })
       return { contents, loader }
     })
-    build.onLoad({ filter: /cordis-plugin-loader\/lib\/index\.js$/u }, ({ path }) => {
+    build.onLoad({ filter: /cordis-plugin-loader[\\/]lib[\\/]index\.js$/u }, ({ path }) => {
       const parent = JSON.stringify(pathToFileURL(path).href)
       const contents = readFileSync(path, 'utf8')
         .replaceAll('await import(__rewriteRelativeImportExtension(', `await globalThis.__acrylImport(${parent}, __rewriteRelativeImportExtension(`)

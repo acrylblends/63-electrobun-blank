@@ -1,0 +1,5 @@
+{
+  "name": "Electrobun Blank",
+  "description": "The ACRYL Blends Blank app as an installable Electrobun app for macOS, Windows and Linux, the frame host on Bun (no Node, no Chromium); the page lists the measured sizes against the Electron build.",
+  "plugins": []
+}
