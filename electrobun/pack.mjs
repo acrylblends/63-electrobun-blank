@@ -114,6 +114,13 @@ if (process.platform === 'darwin') {
   }
 }
 const stageBytes = { payload: bytes(join(stage, 'payload')), node: bytes(join(stage, 'node')), git: bytes(join(stage, 'vcs')) }
+// The Electron work folder is no longer needed (the Intel macOS runner ran out of disk in the DMG step with it in place): keep its installer only.
+const electronCopy = join(out, `ACRYL-Blends-Electron-${OS}-${arch}${electronInstaller.slice(electronInstaller.lastIndexOf('.'))}`)
+copyFileSync(electronInstaller, electronCopy)
+if (!args.includes('--reuse')) {
+  rmSync(tmp, { recursive: true, force: true })
+  rmSync(electronOut, { recursive: true, force: true })
+}
 
 // 3. The Electrobun build. Hutch (Electrobun's tool) may append a PATH line to the shell profile: run this in CI or with a scratch HOME.
 rmSync(join(dist, 'electrobun-build'), { recursive: true, force: true })
@@ -153,7 +160,6 @@ for (const file of listing) {
   copyFileSync(from, to)
   shipped.push({ file: basename(to), bytes: statSync(to).size })
 }
-copyFileSync(electronInstaller, join(out, `ACRYL-Blends-Electron-${OS}-${arch}${electronInstaller.slice(electronInstaller.lastIndexOf('.'))}`))
 
 const electrobun = {
   artifacts: shipped,
