@@ -92,6 +92,11 @@ Electrobun.events.on('before-quit', (event: { response?: { allow: boolean } }) =
 process.on('exit', () => {
   if (!stopped) void host.stop()
 })
+// A logout or `kill` ends the app with a signal, not through Quit: stop the host first there too.
+for (const name of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const)
+  process.on(name, () => {
+    void stopHost().then(() => process.exit(0))
+  })
 
 let url: string
 try {
