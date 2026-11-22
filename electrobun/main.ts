@@ -102,14 +102,38 @@ const host = startFrameHost({
         hostScript: join(chosen.root, 'scripts', 'ide-host.mjs'),
       }
     : {}),
+  // The frame reloads an edited app inside the running host; a restart would end the agents' terminals (run-host.mjs).
+  runner: join(app, 'run-host.mjs'),
   vcsBin,
   write: (text: string) => {
     process.stdout.write(text)
     try {
       appendFileSync(logFile, text)
     } catch {}
+    reloadOnRestart(text)
   },
 })
+
+/**
+ * A saved change in the app's source or plugins restarts the host (watch-host), and the window then loads the restarted host's address, so the person
+ * and the agent see the change without reloading by hand. The Electron shell does the same (desktop-shell main.js, startHost: hostRestarting).
+ */
+let window: BrowserWindow | undefined
+let restarting = false
+let pending = ''
+function reloadOnRestart(text: string): void {
+  pending = (pending + text).slice(-4000)
+  if (/Restarting '/u.test(text)) {
+    restarting = true
+    pending = text.slice(text.lastIndexOf("Restarting '"))
+  }
+  if (!restarting) return
+  const again = /acrylblends host: (http:\/\/\S+)/u.exec(pending)?.[1]
+  if (again === undefined || window === undefined) return
+  restarting = false
+  pending = ''
+  window.webview.loadURL(again)
+}
 
 let stopped = false
 const stopHost = async () => {
@@ -152,7 +176,7 @@ try {
 console.log(`electrobun-blank: frame host ready after ${(performance.now() - started).toFixed(0)} ms`)
 
 const origin = new URL(url).origin
-const window = new BrowserWindow({ title, url, frame: { width: 1280, height: 820, x: 120, y: 80 } })
+window = new BrowserWindow({ title, url, frame: { width: 1280, height: 820, x: 120, y: 80 } })
 // Links to other sites open in the person's browser, as the Electron shell does (navigation() in desktop-shell frame.ts).
 window.webview.on('will-navigate', (event: { data?: { url?: string }; response?: { allow: boolean } }) => {
   const target = event.data?.url

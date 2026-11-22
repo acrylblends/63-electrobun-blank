@@ -7,9 +7,9 @@
  * The frame's app generation (`?gen=N`, how the dev host loads the app's code again after an edit) is not a module key on Bun: a file whose
  * generation changed is taken out of Bun's module cache (require.cache, which Bun's ESM loader also reads) and so loads again, fresh.
  */
-import { readFileSync } from 'node:fs'
-import { builtinModules } from 'node:module'
-import { dirname } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { builtinModules, createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const resolvers = []
@@ -87,6 +87,52 @@ function chain(spec, parentURL) {
   }
 }
 
+/**
+ * The framework's names (`acrylblends`, `acrylblends/<sub>`, `@acryldev/router`, ...) for a file of the app. In an app the framework is source under
+ * `plugins/router/src`, not a package, so a plugin the agent writes (`import { Acryl } from 'acrylblends'`, as the app's AGENTS.md says) has nothing to
+ * resolve to. Node's dev scripts map them in plugins/node-server/src/register.ts; the packed host preloads the Program's built register.js, which
+ * maps them only beside its own plugins folder, so here they are mapped for the app the file belongs to, from that app's own routerAliases().
+ * Only a bare name Bun could not resolve, only in a file that is not in node_modules.
+ */
+const appAliases = new Map()
+const requireHere = createRequire(import.meta.url)
+function aliasFor(spec, parentURL) {
+  if (!parentURL?.startsWith('file:') || /^[./]|^[a-z]+:/iu.test(spec)) return undefined
+  const parent = fileURLToPath(splitQuery(parentURL)[0])
+  if (/[\\/]node_modules[\\/]/u.test(parent)) return undefined
+  for (let dir = dirname(parent); dir !== dirname(dir); dir = dirname(dir)) {
+    const resolver = join(dir, 'plugins', 'extensions', 'resolve.ts')
+    if (!appAliases.has(dir)) {
+      if (!existsSync(resolver) || !existsSync(join(dir, 'plugins', 'router', 'src', 'index.ts'))) continue
+      let aliases = {}
+      try {
+        aliases = requireHere(resolver).routerAliases()
+      } catch (error) {
+        console.error(`bun-node-hooks: ${resolver}: ${error?.message ?? error}`)
+      }
+      appAliases.set(dir, aliases)
+    }
+    const alias = appAliases.get(dir)[spec]
+    return alias === undefined ? undefined : pathToFileURL(alias).href
+  }
+  return undefined
+}
+/** `text` of the app file at `path` with each framework name Bun cannot resolve from there replaced by the file it names. */
+const SPECIFIERS = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(["'])([^"'\n]+)\2/gu
+function withFrameworkFiles(path, text) {
+  const parentURL = pathToFileURL(path).href
+  return text.replace(SPECIFIERS, (all, lead, quote, spec) => {
+    const alias = aliasFor(spec, parentURL)
+    if (alias === undefined) return all
+    try {
+      Bun.resolveSync(spec, dirname(path))
+      return all
+    } catch {
+      return `${lead}${quote}${alias}${quote}`
+    }
+  })
+}
+
 /** The Cordis loader's import(): resolve through the hooks first (as Node's loader would), then import the file. */
 globalThis.__acrylImport = (parentURL, spec) => {
   const url = resolveThroughHooks(spec, parentURL)
@@ -151,6 +197,13 @@ Bun.plugin({
         .replaceAll('await import(__rewriteRelativeImportExtension(', `await globalThis.__acrylImport(${parent}, __rewriteRelativeImportExtension(`)
         .replaceAll('this.ctx.logger.error(error);', "if (process.env.ACRYL_HOOKS_DEBUG === '1') console.error('[row]', this.options?.name, error?.stack ?? error); this.ctx.logger.error(error);")
       return { contents, loader: 'js' }
+    })
+    // Registered after the others: a file one of them matches keeps that answer. Bun runs no runtime onResolve for a bare name a plain
+    // source file imports, so the app's framework names are replaced in its files as they load (only files outside node_modules).
+    build.onLoad({ filter: /^(?!.*[\\/]node_modules[\\/]).*\.(ts|tsx|mts|js|mjs|jsx)$/u }, ({ path }) => {
+      const text = readFileSync(path, 'utf8')
+      const ext = /\.([a-z]+)$/u.exec(path)[1]
+      return { contents: withFrameworkFiles(path, text), loader: ext === 'mts' ? 'ts' : ext === 'mjs' ? 'js' : ext }
     })
     build.onResolve({ filter: /.*/u }, (args) => {
       const parentURL = args.importer ? pathToFileURL(args.importer).href : undefined
