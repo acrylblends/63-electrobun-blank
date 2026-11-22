@@ -4,8 +4,8 @@
  * load to take it from here. Resolve hooks run as one chain (last registered first, as Node does) from a Bun runtime onResolve plugin for static
  * imports, and from the Cordis loader's own import() calls (rewritten on load), because Bun does not run onResolve for a dynamic import() of a
  * computed specifier. Load hooks are dropped: they compile JSX, which Bun does itself.
- * shortcut: a resolved URL's query (the frame's app generation, used to reload app code in development) is dropped; a real port needs Bun to key
- * modules by query or a different reload.
+ * The frame's app generation (`?gen=N`, how the dev host loads the app's code again after an edit) is not a module key on Bun: a file whose
+ * generation changed is taken out of Bun's module cache (require.cache, which Bun's ESM loader also reads) and so loads again, fresh.
  */
 import { readFileSync } from 'node:fs'
 import { builtinModules } from 'node:module'
@@ -29,6 +29,18 @@ globalThis.__acrylRegisterHooks = (hooks) => {
 const splitQuery = (url) => {
   const at = url.search(/[?#]/u)
   return at === -1 ? [url, ''] : [url.slice(0, at), url.slice(at)]
+}
+
+/** The file of a resolved URL, taken out of Bun's module cache when its generation query changed since its last load. */
+const generations = new Map()
+function fileOf(url) {
+  const [plain, query] = splitQuery(url)
+  const path = fileURLToPath(plain)
+  if (query !== '' && generations.get(path) !== query) {
+    delete require.cache[path]
+    generations.set(path, query)
+  }
+  return path
 }
 
 /** The registered resolve hooks as Node runs them, over Bun's own resolution; undefined when they do not apply. */
@@ -79,8 +91,36 @@ function chain(spec, parentURL) {
 globalThis.__acrylImport = (parentURL, spec) => {
   const url = resolveThroughHooks(spec, parentURL)
   debug('import', spec, '->', url)
-  return import(url === undefined ? spec : fileURLToPath(splitQuery(url)[0]))
+  return import(url === undefined ? spec : fileOf(url))
 }
+
+/**
+ * The frame's TypeScript compile (`compileModule` of @acryldev/node-server: client modules for the browser) with Bun's own transpiler, so the
+ * `typescript` package (20 MB) does not ship. Same contract: JSX on the automatic runtime from `importSource` (a file's own @jsxImportSource pragma
+ * wins), ES module out, and each import specifier `rewrite` maps replaced. Bun's output has no comments, so only real import specifiers match.
+ * shortcut: no inline source map (TypeScript's had one); browser devtools show the compiled module. Add one if debugging client modules on Bun needs it.
+ */
+const LOADERS = { '.tsx': 'tsx', '.jsx': 'jsx', '.ts': 'ts', '.mts': 'ts', '.cts': 'ts' }
+const transpilers = new Map()
+globalThis.__acrylBunCompile = (file, text, options) => {
+  const importSource = options.importSource ?? options.defaultImportSource
+  const loader = LOADERS[/\.[^.\\/]+$/u.exec(file)?.[0] ?? ''] ?? 'js'
+  const key = `${loader}\0${importSource}`
+  let transpiler = transpilers.get(key)
+  if (transpiler === undefined) {
+    const compilerOptions = { jsx: 'react-jsx', ...(importSource === undefined ? {} : { jsxImportSource: importSource }) }
+    transpiler = new Bun.Transpiler({ loader, target: 'browser', autoImportJSX: true, tsconfig: { compilerOptions } })
+    transpilers.set(key, transpiler)
+  }
+  const code = transpiler.transformSync(text)
+  if (options.rewrite === undefined) return code
+  return code.replace(/(\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(["'])([^"'\n]+)\2/gu, (all, lead, quote, specifier) => {
+    const replacement = options.rewrite(specifier)
+    return replacement === undefined ? all : `${lead}${quote}${replacement}${quote}`
+  })
+}
+// The function's first line, in the built chunk (lib/transpile-<hash>.js) and in the plugin source library copies carry (src/transpile.ts).
+const COMPILE = /function compileModule\(file[^)]*\)[^{]*\{/u
 
 const IMPORTS_HOOKS = /import\s*\{([^}]*)\bregisterHooks\b([^}]*)\}\s*from\s*["']node:module["'];?/u
 
@@ -100,6 +140,11 @@ Bun.plugin({
       })
       return { contents, loader }
     })
+    build.onLoad({ filter: /((node-server|blends)[\\/]lib[\\/]transpile-[^\\/]+\.js|node-server[\\/]src[\\/]transpile\.ts)$/u }, ({ path }) => {
+      const text = readFileSync(path, 'utf8')
+      if (!COMPILE.test(text)) console.error(`bun-node-hooks: ${path} has no compileModule to take over; client modules need the typescript package`)
+      return { contents: text.replace(COMPILE, (head) => `${head} return globalThis.__acrylBunCompile(file, text, options);`), loader: path.endsWith('.ts') ? 'ts' : 'js' }
+    })
     build.onLoad({ filter: /cordis-plugin-loader[\\/]lib[\\/]index\.js$/u }, ({ path }) => {
       const parent = JSON.stringify(pathToFileURL(path).href)
       const contents = readFileSync(path, 'utf8')
@@ -110,7 +155,7 @@ Bun.plugin({
     build.onResolve({ filter: /.*/u }, (args) => {
       const parentURL = args.importer ? pathToFileURL(args.importer).href : undefined
       const url = resolveThroughHooks(args.path, parentURL)
-      return url === undefined ? undefined : { path: fileURLToPath(splitQuery(url)[0]) }
+      return url === undefined ? undefined : { path: fileOf(url) }
     })
   },
 })
