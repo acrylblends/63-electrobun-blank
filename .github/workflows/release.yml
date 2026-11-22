@@ -1,0 +1,77 @@
+name: Release
+
+# The ACRYL Blends Blank app as an Electrobun app on every OS and CPU Electrobun builds for, next to the Electron build of the same Program for a
+# size comparison (`node electrobun/pack.mjs`: the official `acrylblends pack` first, then the Electrobun bundle from its files). A tag v<version>
+# publishes the Electrobun installers, the Electron installers and the measured sizes (sizes-<os>-<arch>.json) as this repository's Latest release.
+# Run by hand, it packs them all as workflow artifacts and publishes nothing.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ACRYLBLENDS_VERSION: '1.7.25'
+
+jobs:
+  pack:
+    name: pack (${{ matrix.platform }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, platform: mac, arch: arm64 }
+          - { os: macos-15-intel, platform: mac, arch: x64 }
+          - { os: windows-latest, platform: win, arch: x64 }
+          - { os: windows-11-arm, platform: win, arch: arm64 }
+          - { os: ubuntu-24.04, platform: linux, arch: x64 }
+          - { os: ubuntu-24.04-arm, platform: linux, arch: arm64 }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      # The Electron .deb is built with fakeroot and dpkg; Electrobun's Linux window uses GTK3 and WebKitGTK 4.1.
+      - if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y fakeroot libgtk-3-0 libwebkit2gtk-4.1-0 zstd
+      - name: Version from the tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: echo "ELECTROBUN_APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Pack with Electron and with Electrobun
+        shell: bash
+        run: node electrobun/pack.mjs --blends "$ACRYLBLENDS_VERSION" --arch ${{ matrix.arch }} --out out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.platform }}-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: pack
+    # A platform Electrobun cannot build for yet must not hold the others back: publish what was packed.
+    if: always() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish the release as Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la out
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --latest --title "ACRYL Blends on Electrobun $GITHUB_REF_NAME" \
+              --notes "The ACRYL Blends Blank app in an Electrobun window (system webview, Bun main process, the frame host on the bundled Node). ACRYL-Blends-Electrobun-* are the Electrobun installers; ACRYL-Blends-Electron-* are the Electron builds of the same app for comparison; sizes-*.json hold the measured sizes. Not signed: on macOS right-click the app and choose Open; on Windows, if SmartScreen asks, click More info and then Run anyway."
+          fi
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --latest >/dev/null

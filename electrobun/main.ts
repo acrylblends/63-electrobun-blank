@@ -1,36 +1,118 @@
 /**
- * The desktop window on Electrobun instead of Electron: this file runs in Electrobun's main process (Bun) and shows the ACRYL Blends frame, the same
- * frame `npm run dev` serves (sessions on the left, the app in the middle, chat and the agents on the right), in a native window that uses the system
+ * The installed ACRYL Blends Blank app on Electrobun instead of Electron. This file is Electrobun's main process (Bun); the window is the system
  * webview (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux).
  *
- * It does what `npm run desktop` (plugins/desktop/main.ts) does, with the same functions from plugins/desktop/frame.ts: attach to the frame that already
- * runs for this folder, or start it the way `npm run dev` does and open the address it prints. A frame this window started stops when the window closes.
- *
- * Why the frame host stays on Node: it loads TypeScript and plugins through `node:module` `registerHooks`, which Bun does not have, and its terminals
- * (node-pty) are built for Node. Only the shell changes (the route ACRYL's spec 042 called Option A).
+ * It does what @acryldev/desktop-shell's Electron main does for a packed product, with the same steps (electrobun/shell-core.mjs is a copy of them):
+ * open the product's app in ~/.acryl (on the first start, make it from the bundled Blank app), start the frame host from the bundle (the Program),
+ * and open one window on the address it prints. The frame host runs on the Node that ships inside the bundle (resources app/node), because the
+ * framework loads plugins through node:module registerHooks, which Bun does not have. Closing the window stops the host.
  */
-import Electrobun, { BrowserWindow } from 'electrobun/main'
-import { frameHome, runningFrame, startFrameHost } from '../plugins/desktop/frame.ts'
+import Electrobun, { ApplicationMenu, BrowserWindow, Utils } from 'electrobun/main'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { openProduct, startFrameHost } from './shell-core.mjs'
 
-const root = process.env.ACRYL_APP_ROOT
-if (root === undefined || root === '') {
-  console.error('electrobun-blank: start it with `npm run electrobun` in the app folder')
-  process.exit(1)
+// Electrobun starts the main process in the bundle's bin folder (macOS: Contents/MacOS); its resources are ../Resources (electrobun/main Paths.ts).
+const app = join(resolve('../Resources'), 'app')
+const program = join(app, 'payload')
+const node = join(app, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
+const vcs = join(app, 'vcs', 'bin')
+const vcsBin = existsSync(vcs) ? vcs : undefined
+// The bundled Git's builtin names travel as a list (electrobun/pack.mjs): make the links once, in the app Electrobun unpacked.
+const linksFile = join(app, 'vcs', 'links.json')
+if (existsSync(linksFile)) {
+  const core = join(app, 'vcs', 'libexec', 'git-core')
+  for (const { name, to } of JSON.parse(readFileSync(linksFile, 'utf8')) as { name: string; to: string }[])
+    if (!existsSync(join(core, name))) {
+      try {
+        symlinkSync(to, join(core, name))
+      } catch {}
+    }
 }
+const title = 'ACRYL Blends (Electrobun)'
 
-const running = await runningFrame(frameHome(root, process.env))
-const host = running === undefined ? startFrameHost(root, process.env, (text) => process.stdout.write(text)) : undefined
+ApplicationMenu.setApplicationMenu([
+  {
+    submenu: [
+      { role: 'about' },
+      { type: 'divider' },
+      { role: 'hide', accelerator: 'h' },
+      { role: 'hideOthers' },
+      { role: 'showAll' },
+      { type: 'divider' },
+      { role: 'quit', accelerator: 'q' },
+    ],
+  },
+  {
+    label: 'Edit',
+    submenu: [
+      { role: 'undo' },
+      { role: 'redo' },
+      { type: 'divider' },
+      { role: 'cut' },
+      { role: 'copy' },
+      { role: 'paste' },
+      { role: 'selectAll' },
+    ],
+  },
+  { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'close' }] },
+])
+
+const started = performance.now()
+const { chosen, instance } = await openProduct({ program, vcsBin, version: '0.2.0' })
+const logs = join(chosen.home, 'logs')
+mkdirSync(logs, { recursive: true })
+const logFile = join(logs, 'electrobun-host.log')
+const host = startFrameHost({
+  program,
+  chosen,
+  instance,
+  runtime: node,
+  vcsBin,
+  write: (text: string) => {
+    process.stdout.write(text)
+    try {
+      appendFileSync(logFile, text)
+    } catch {}
+  },
+})
+
+let stopped = false
+const stopHost = async () => {
+  if (stopped) return
+  stopped = true
+  await host.stop()
+}
+// The host is its own process group: quitting waits for it to end, then quits for real, so closing the window leaves no process behind.
+Electrobun.events.on('before-quit', (event: { response?: { allow: boolean } }) => {
+  if (stopped) return
+  event.response = { allow: false }
+  void stopHost().then(() => Utils.quit())
+})
+process.on('exit', () => {
+  if (!stopped) void host.stop()
+})
 
 let url: string
 try {
-  url = running ?? (await host!.ready)
+  url = await host.ready
 } catch (error) {
   console.error(`electrobun-blank: ${(error as Error).message}`)
+  await stopHost()
   process.exit(1)
 }
+console.log(`electrobun-blank: frame host ready after ${(performance.now() - started).toFixed(0)} ms`)
 
-// A frame this window started ends with it; one that already ran (a terminal's `npm run dev`) keeps running.
-Electrobun.events.on('before-quit', () => void host?.stop())
-process.on('exit', () => void host?.stop())
-
-new BrowserWindow({ title: 'electrobun-blank', url, frame: { width: 1280, height: 820, x: 120, y: 80 } })
+const origin = new URL(url).origin
+const window = new BrowserWindow({ title, url, frame: { width: 1280, height: 820, x: 120, y: 80 } })
+// Links to other sites open in the person's browser, as the Electron shell does (navigation() in desktop-shell frame.ts).
+window.webview.on('will-navigate', (event: { data?: { url?: string }; response?: { allow: boolean } }) => {
+  const target = event.data?.url
+  if (target === undefined) return
+  try {
+    const parsed = new URL(target)
+    if (parsed.origin === origin || !/^(https?|mailto):$/u.test(parsed.protocol)) return
+    event.response = { allow: false }
+    Utils.openExternal(target)
+  } catch {}
+})

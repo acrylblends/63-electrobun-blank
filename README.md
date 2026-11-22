@@ -1,53 +1,66 @@
-# electrobun-blank
+# ACRYL Blends on Electrobun
 
-A Cordis app on Node, scaffolded by `acrylblends init`. TypeScript, run by Node with no build step. Every part is a
-Cordis plugin.
+The ACRYL Blends Blank app (the app `npx @acryldev/create-blends@latest` makes: the frame with sessions and versions on the left, the app in the
+middle, chat and the agents on the right) as an installable desktop app on **Electrobun** instead of Electron. Same app, same Program, same data
+folder (`~/.acryl/apps/<id>`); only the shell around it changes. It is a size and behaviour experiment: the Electron build stays ACRYL's default.
 
-This blank app also opens in an **Electrobun** window instead of Electron: the same ACRYL Blends frame (sessions and versions on the left, the
-app in the middle, chat and the agents on the right) in a native window that uses the system webview. Try it as a platform:
+## Download
 
-```sh
-npm install
-npm run electrobun   # builds the Electrobun shell, starts the frame (npm run dev) and opens it in the window
-```
+From the [Latest release](https://github.com/acrylblends/63-electrobun-blank/releases/latest):
 
-`npm run desktop` still opens the same frame in Electron. Electron stays the default; Electrobun is an option to try.
+| OS | Electrobun build | Electron build of the same app (for comparison) |
+| --- | --- | --- |
+| macOS (Apple silicon) | `ACRYL-Blends-Electrobun-mac-arm64.dmg` | `ACRYL-Blends-Electron-mac-arm64.dmg` |
+| macOS (Intel) | `ACRYL-Blends-Electrobun-mac-x64.dmg` | `ACRYL-Blends-Electron-mac-x64.dmg` |
+| Windows | `ACRYL-Blends-Electrobun-win-x64.*` | `ACRYL-Blends-Electron-win-x64.exe` |
+| Linux | `ACRYL-Blends-Electrobun-linux-x64.*` | `ACRYL-Blends-Electron-linux-x64.deb` |
 
-## Electrobun
-
-- Version: Electrobun 2.0.6 (stable), from npm. Its main process runs on Bun 1.4.4; the window uses WKWebView on macOS, WebView2 on Windows,
-  WebKitGTK on Linux (no bundled Chromium, `bundleCEF: false`).
-- `electrobun/main.ts` is the whole shell. It does what `npm run desktop` does with the same functions (`plugins/desktop/frame.ts`): it attaches
-  to a frame that already runs for this folder, or starts `npm run dev` and opens the address it prints. Closing the window stops a frame it started.
-- The frame host stays on Node. The framework loads TypeScript and plugins through `node:module` `registerHooks`, which Bun does not have (the app
-  fails on Bun 1.4.4 with `Export named 'registerHooks' not found in module 'node:module'`), and the terminals use node-pty, built for Node.
-- First run: the `electrobun` package downloads its build tool (Hutch, about 130 MB, into `~/.hutch`) and **adds a PATH line to your shell
-  profile** (`~/.zshrc` on macOS), even when `HOME` points elsewhere. Remove the `# Hutch` lines afterwards if you do not want them.
-- Platforms: tried on macOS arm64. Electrobun also supports Windows x64 and Linux x64/arm64 (Linux needs GTK3, WebKitGTK 4.1, AppIndicator and
-  librsvg); not tried here. It does not support Intel Macs and does not cross-compile: build on each OS. `npm run electrobun` uses a POSIX shell.
-- Not done yet: a packed, installable Electrobun app of this Blend. The shell is built and measured below, but a packed app must also carry
-  Node and the frame's packages, and `electrobun/main.ts` runs only from the app folder for now.
+The builds are not signed. macOS: right-click the app and choose Open. Windows: if SmartScreen asks, click More info and then Run anyway. The
+first start unpacks the app (about 15 s on macOS, a small "Setup" window says when it is done; close it).
 
 ## Sizes
 
-Measured on macOS arm64, 2026-11-18. MB = 1,000,000 bytes.
+| OS | Download: Electron | Download: Electrobun | Installed: Electron | Installed: Electrobun | Electrobun parts: shell + Node + Git + app |
+| --- | ---: | ---: | ---: | ---: | --- |
+| mac arm64 | 204.1 | 111.7 (-45%) | 546.6 | 473.3 (-13%) | 111.9 + 121.3 + 35.9 + 204.1 |
 
-| Part | Electron 44.9.3 | Electrobun 2.0.6 |
-|---|---|---|
-| Shell, installed | 309.4 MB | 95.7 MB (ships as 33.5 MB, unpacks on first launch) |
-| Shell, DMG | 141.1 MB | 33.1 MB (Electrobun's own DMG) |
-| Node to run the frame host | none: Electron runs it as Node | 121.3 MB (Node 24.19.0) |
-| The frame's packages (`node_modules` without dev packages) | 451.6 MB | 451.6 MB |
-| **Total, installed** | **761.0 MB** | **668.6 MB (-12%)** |
+Electron's parts on the same rows: shell mac arm64 306.6; the app (payload) is the same bytes on both sides.
 
-- The shell alone is 69% smaller installed and 77% smaller as a DMG.
-- The whole app is only 12% smaller, because Electron doubles as the Node that runs the frame host, while Electrobun has to ship Node beside
-  Bun, and the frame's packages (451.6 MB) are the same either way. The totals are added up from the measured parts, not from a packed app.
-- If the frame host could run on Electrobun's Bun (it cannot until Bun has `registerHooks`), Node would drop out: 547.3 MB, 28% smaller.
-- The size lever that does not depend on the shell is the frame's packages.
-- Earlier measurements from ACRYL (spec 042): a Deno-packed ACRYL was 53% smaller installed than the pruned Electron one (210.3 MB vs 447.1 MB);
-  a `bun --compile` executable is 61 MB on macOS against Node's 121 MB.
-- Not measured: start time and memory.
+MB = 1,000,000 bytes, apparent size (the sum of file sizes), measured by `electrobun/pack.mjs` on the release runners from the same Program
+(`sizes-<os>-<arch>.json` in the release). "Installed" is the app after its first start.
+
+Why the installed size drops less than the download: Electron doubles as the Node that runs the frame host, while the Electrobun build ships Node
+(about 121 MB on macOS) beside Electrobun's Bun, because the framework loads plugins through `node:module` `registerHooks`, which Bun does not
+have yet. The download drops more because Electrobun ships the app zstd-compressed and unpacks it on the first start.
+
+## How it works
+
+- `electrobun/main.ts` is Electrobun's main process (Bun). It does for the packed product what `@acryldev/desktop-shell`'s Electron main does,
+  with the same steps (`electrobun/shell-core.mjs` is a copy of them): open the product's app in `~/.acryl` (on the first start, make it from
+  the bundled Blank app), start the frame host from the bundle on the bundled Node, open one window (the system webview: WKWebView on macOS,
+  WebView2 on Windows, WebKitGTK on Linux) on the address the host prints, and stop the host when the window closes.
+- `electrobun/pack.mjs` packs both: `npx @acryldev/blends pack` (the official Electron product), then an Electrobun bundle from the same files
+  (`resources/app` of the Electron build), the Node that runs the script, and on macOS the bundled Git. `.github/workflows/release.yml` runs it
+  on every OS; a tag `v<version>` publishes the release.
+
+```sh
+npm run pack:electrobun    # this machine's OS and CPU; writes dist/release
+```
+
+Hutch (Electrobun's build tool, downloaded on first use into `~/.hutch`) may add a PATH line to your shell profile. Run it in CI or check
+`~/.zshrc` afterwards.
+
+## Not the same as the Electron build yet
+
+- No updater (Electrobun has its own update channel; the ACRYL GitHub-release updater is Electron-only), no door window calls (`acryl window
+  ...`), no Settings > App pages that need the Electron preload, no host restart supervisor.
+- The window's process is named `bun` in macOS's process list; the Dock shows the app's name and icon.
+- No Intel-Mac guarantee: Electrobun lists Apple silicon, Windows x64 and Linux x64/arm64 as its platforms.
+
+## The app itself
+
+A Cordis app on Node, scaffolded by `acrylblends init`. TypeScript, run by Node with no build step. Every part is a
+Cordis plugin.
 
 ```sh
 npm install
@@ -56,12 +69,12 @@ npm test
 npm run check      # type-check
 ```
 
-- `src/main.ts` chooses where the app lives (`plugins/instance`) and starts it.
+- `src/main.ts` chooses where the app lives (the `@acryldev/instance` package) and starts it.
 - `blend.yaml` is the app as data: which plugins it mounts, in what order, with what config and parameters. Switch
   one off with `disabled: true`. `npm run lock` writes `blend.lock.json`: the manifest's digest and a digest of
   every plugin folder, so a diff of the lock shows what changed.
 - `src/app.ts` holds the registry of plugins the code provides, and mounts the manifest's rows.
-- `src/routes.ts` is your own plugin: it builds an `App` (`import { App } from './plugins/acryl-router/src/index.ts'`) and mounts it with `ctx.router.route(prefix, app)`. Routes added to the app after it is mounted are not served. A page mounted at `/x` answers `/x`, not `/x/` (trailing slashes are strict). The router API is documented at https://acrylblends.github.io/docs/framework/the-acryl-framework and in `docs/framework` of the acrylblends repository.
+- `src/routes.ts` is your own plugin: it builds an `App` (`import { App } from './plugins/router/src/index.ts'`) and mounts it with `ctx.router.route(prefix, app)`. Routes added to the app after it is mounted are not served. A page mounted at `/x` answers `/x`, not `/x/` (trailing slashes are strict). The router API is documented at https://acrylblends.github.io/docs/framework/the-acryl-framework and in `docs/framework` of the acrylblends repository.
 - `plugins/` holds the plugins copied from the ACRYLBLENDS library. They are yours now; edit them freely.
   Add more with `acrylblends add <plugin>`.
 

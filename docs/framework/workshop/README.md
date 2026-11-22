@@ -8,7 +8,7 @@ app around it: a folder of Cordis plugins with a `blend.yaml`, running on your m
 The frame is the workshop's point. You do not edit a folder and alt-tab to a browser: your app is a page inside the workspace, the agents work in
 the same folder the frame shows, and every change you or an agent makes is one restart away from the page.
 
-This guide is for **acrylblends 1.3.0 or newer**; `npm create acrylblends@latest` gives you that. An app you made with an older release gets the
+This guide is for **acrylblends 1.3.0 or newer**; `npm create @acryldev/blends@latest` gives you that. An app you made with an older release gets the
 frame with the upgrade in block 6.
 
 ## The fastest start: ACRYL Control Center
@@ -38,7 +38,7 @@ what is inside.
 Run this first. It checks everything below and prints one line per check, with the exact command for anything missing:
 
 ```sh
-npx acrylblends@latest preflight
+npx @acryldev/blends@latest preflight
 ```
 
 It ends with `Ready for the workshop.`, or with how many lines say `FIX`: run each `FIX` line, then the preflight again. `NOTE` lines are things the
@@ -103,7 +103,7 @@ between watching and building.
 ## 1. Create the app; the frame opens on it (10 minutes)
 
 ```sh
-npm create acrylblends@latest my-app agent -- --desktop
+npm create @acryldev/blends@latest my-app agent -- --desktop
 cd my-app
 npm install
 npm run dev
@@ -215,7 +215,7 @@ reconnects, the `my-app` tab.
 
 An agent that works in this folder can also use the app's **door**, the page channel the app carries in development: `.acryl/bin/acryl look` prints
 what is on the page with refs, and `act` clicks, types, selects, presses, scrolls, waits, navigates and reloads. Ask the terminal agent to look at
-the page before it tells you it is done; the app's own docs (`AGENTS.md`, `plugins/acryl-door`) say how.
+the page before it tells you it is done; the app's own docs (`AGENTS.md`, `plugins/door`) say how.
 
 **Stuck?** An agent that says the terminal is not a TTY needs the tab, not a script. If the agent cannot log in, sign in in a terminal first
 (`claude`, `codex login`, pi with `DEEPSEEK_API_KEY`), then open the tab again.
@@ -228,7 +228,7 @@ generated, plus the library plugins the app carries.
 
 ```sh
 cd old-app
-npx acrylblends@latest upgrade
+npx @acryldev/blends@latest upgrade
 npm install
 npm run dev
 ```
@@ -238,7 +238,7 @@ today answers "everything is up to date" too. An app from a release **before 0.7
 folder that release did not write); the upgrade says so instead of touching it.
 
 **Stuck?** "is not the previous release's scaffold" means you edited a generated file: run with `--diff` to see it, save your version aside, and
-run again (or `--force`; the app's versions are backed up under `.acrylblends/upgrade-backup/`).
+run again (or `--force`; the app's versions are backed up under `.acryl/upgrade-backup/`).
 
 ## 7. Publish it as a starter (10 minutes, take-home)
 
@@ -258,7 +258,7 @@ gh pr create --fill --repo acryldev/workshop-2026-11-20
 commit` as two lines, or join them with `;`.)
 
 A check runs on the pull request and merges it: your starter is listed in about two minutes, and anyone can start from it with
-`npm create acrylblends@latest another-app -- --from <your-github-login>.my-app --registry github:acryldev/workshop-2026-11-20`.
+`npm create @acryldev/blends@latest another-app -- --from <your-github-login>.my-app --registry github:acryldev/workshop-2026-11-20`.
 
 **Stuck?** The registry's check comments what to change; fix, commit, push again. `gh auth status` not logged in means `gh auth login`.
 
@@ -280,7 +280,7 @@ the same folders. Nothing to install, nothing to keep on your machine. Until it 
 
 | Symptom | Do |
 | --- | --- |
-| The preflight prints `FIX` lines | run each one, then `npx acrylblends@latest preflight` again |
+| The preflight prints `FIX` lines | run each one, then `npx @acryldev/blends@latest preflight` again |
 | `npm create` fails or hangs | check the network; the facilitator has prepared apps |
 | `npm install` fails building node-pty | install the C++ toolchain (block 1's **Stuck?**) and run it again |
 | A port is taken | use the address the app printed |

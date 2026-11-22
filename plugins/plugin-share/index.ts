@@ -14,32 +14,50 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { type Context, Service } from '@deepseek-ai/cordis'
-import { findSecrets } from '@webboxes/app-persistence'
-import { digestFolder, type PluginFile } from '@webboxes/blends-core'
+import { findSecrets } from '@acryldev/app-persistence'
+import { digestFolder, type PluginFile, pluginFiles } from '@acryldev/blends-core'
+import { type ExtensionInfo, NAME } from '../extensions/index.ts'
+import type {} from '@acryldev/instance'
+import { LOCK_FILE, writeLock } from '../manifest/lock.ts'
 import {
   bumpVersion,
+  firstRegistryPort,
   gitCli,
   githubCli,
-  githubReleasesOverHttps,
   httpsDownload,
   InvalidPluginSourceError,
+  NPM_REGISTRY,
+  npmRegistryOverHttps,
+  npmRegistryViaCli,
   type PluginSource,
   PluginStore,
   PullError,
   packFolder,
   parsePluginSource,
   pullPlugin,
+  type RegistryPort,
   type ReleasePort,
   readTarball,
   sharePlugin,
   storeRootOf,
-} from '@webboxes/plugin-hub'
-import { type ExtensionInfo, NAME } from '../extensions/index.ts'
-import type {} from '../instance/index.ts'
-import { LOCK_FILE, writeLock } from '../manifest/lock.ts'
+} from '@acryldev/plugin-hub-core'
+import { type Context, Service } from '@deepseek-ai/cordis'
+import { type MergedTrees, mergeTrees, type Tree } from './merge-edits.ts'
+import {
+  ensureNative,
+  type NativeAction,
+  type NativePackage,
+  type NativePlaces,
+  type NativePorts,
+  nativeFor,
+  nativePorts,
+  nativesOf,
+  releaseNative,
+} from './native.ts'
+import { npmWithLogin } from './npm-login.ts'
 import { packagePlugin } from './package.ts'
 import {
+  npmPullLineOf,
   type PublishOptions,
   type PublishPlan,
   type PublishPorts,
@@ -57,6 +75,8 @@ import {
 } from './pull-check.ts'
 import { LIST_MAX_BYTES, parsePullList, pullListLocation } from './pull-list.ts'
 import { type PulledRecord, pulledRecords, withPulledRecord } from './pulled-records.ts'
+import { lookUpRegistry, REGISTRY_INDEX_URL } from './registry-source.ts'
+import { LIMITED, releasesWithLoginFallback } from './releases-fallback.ts'
 
 export type {
   PublishOptions,
@@ -80,6 +100,12 @@ export interface PluginShareConfig {
   publish?: PublishPorts
   /** How an https address is read: a release `.tgz` and a list of sources. Defaults to HTTPS with the hub's size and time limits. */
   download?: (url: string) => Promise<Uint8Array>
+  /** Where `registry:<id>` reads the plugin registry's index. Defaults to cordisplugins.github.io. */
+  registryIndex?: string
+  /** Where an `npm:` source reads packages. Defaults to the public registry over HTTPS, then the person's own npm (a private scope or registry). */
+  npm?: RegistryPort
+  /** How a plugin's native package is downloaded and unpacked (native.ts). Defaults to the npm registry and the system's tar. */
+  native?: NativePorts
 }
 
 export type PullResult =
@@ -95,6 +121,15 @@ export type PullResult =
       readonly state: string
       /** Whether the app's `blend.yaml` and lock now name this source, so a copy of the app can fetch it. A local file names nothing to fetch. */
       readonly remembered: boolean
+      /** The files of an older pulled copy that kept the person's own changes when this release updated it in place. */
+      readonly kept?: readonly string[]
+      /** The native package the plugin brought for this computer (native.ts), and what installing it did. */
+      readonly native?: {
+        readonly package: string
+        readonly version: string
+        readonly size: number
+        readonly action: NativeAction
+      }
     }
   | PullRefused
 
@@ -166,6 +201,8 @@ function releaseOf(folder: string): string | undefined {
 /** The license a new public plugin is offered under; the plan shows it before the person says yes. */
 const DEFAULT_LICENSE = 'MIT'
 const LICENSE_ID = /^[A-Za-z0-9][A-Za-z0-9.+-]*$/u
+/** An npm scope: what follows `@`. */
+const NPM_SCOPE = /^[a-z0-9][a-z0-9._~-]*$/u
 
 const publishRefused = (reason: string, next: string): PublishRefused => ({
   ok: false,
@@ -173,7 +210,8 @@ const publishRefused = (reason: string, next: string): PublishRefused => ({
   next,
 })
 
-const SOURCE_FORMS = 'github:<owner>/<repo>[@<version>] or a .tgz path or address'
+const SOURCE_FORMS =
+  'github:<owner>/<repo>[@<version>], npm:<package>[@<version>], registry:<id> or a .tgz path or address'
 
 /** Read what a person wrote. A `.tgz` path may be relative to the app folder; the hub only takes absolute ones. */
 function readSource(
@@ -183,7 +221,12 @@ function readSource(
   const { source, digest } = splitDigest(input.trim())
   const isLocalTarball = /\.(?:tgz|tar\.gz)$/iu.test(source) && !/^[a-z][a-z0-9+]+:/iu.test(source)
   const parsed = parsePluginSource(isLocalTarball ? resolve(root, source) : source)
-  if (parsed.kind !== 'github' && parsed.kind !== 'tarball-file' && parsed.kind !== 'tarball-url') {
+  if (
+    parsed.kind !== 'github' &&
+    parsed.kind !== 'npm' &&
+    parsed.kind !== 'tarball-file' &&
+    parsed.kind !== 'tarball-url'
+  ) {
     const named = parsed.kind === 'name' ? 'a bare name' : parsed.kind
     throw new InvalidPluginSourceError(
       input,
@@ -196,7 +239,33 @@ function readSource(
 /** The source as another machine can fetch it: the version pinned; a file on this machine names nothing. */
 function recordedSource(source: PluginSource, version: string): string | undefined {
   if (source.kind === 'github') return `github:${source.owner}/${source.repo}@${version}`
+  if (source.kind === 'npm') return `npm:${source.name.full}@${version}`
   return source.kind === 'tarball-url' ? source.url : undefined
+}
+
+/** What two releases of one plugin share in a recorded source: `github:<owner>/<repo>` or `npm:<package>`, lower case. */
+const repoOf = (source: string): string | undefined => {
+  const github = /^(github:[^/@]+\/[^/@]+)@/u.exec(source)?.[1]
+  const npm = /^(npm:(?:@[^/@]+\/)?[^/@]+)@/u.exec(source)?.[1]
+  return (github ?? npm)?.toLowerCase()
+}
+
+/** A package's folder in `plugins/`: the name after its scope (`@ana/clock` is `clock`). */
+const folderOf = (packageName: string): string =>
+  packageName.includes('/') ? packageName.slice(packageName.lastIndexOf('/') + 1) : packageName
+
+const treeOf = (files: readonly PluginFile[]): Tree =>
+  new Map(files.map((file) => [file.path, file.bytes]))
+
+/** Make a plugin folder hold exactly `to`, having held `from`: files only `from` had go, every file of `to` is written. */
+function applyTree(folder: string, from: Tree, to: Tree): void {
+  for (const path of from.keys())
+    if (!to.has(path)) rmSync(join(folder, ...path.split('/')), { force: true })
+  for (const [path, bytes] of to) {
+    const file = join(folder, ...path.split('/'))
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, bytes)
+  }
 }
 
 const reasonOf = (cause: unknown): string => {
@@ -210,11 +279,16 @@ export class PluginShare extends Service {
   private readonly dir: string
   private readonly releases: ReleasePort
   private readonly download: (url: string) => Promise<Uint8Array>
+  private readonly registryIndex: string
+  private readonly npmRegistry: RegistryPort
   private readonly ports: PublishPorts
   /** One at a time: two pulls of one name must not race for its folder, nor two publishes for its package. */
   private queue: Promise<unknown> = Promise.resolve()
   /** The content digest of each plugin pulled while the app runs, a local file's too, which `blend.yaml` does not remember. */
   private readonly live = new Map<string, string>()
+  private readonly nativeWork: NativePorts
+  /** The native package each installed plugin brought for this computer: what its removal takes away. */
+  private readonly natives = new Map<string, NativePackage>()
 
   /**
    * The context the service was constructed with, in the app's realm. Inside a service method `this.ctx` is Cordis's shadow context of the caller: in the
@@ -226,14 +300,18 @@ export class PluginShare extends Service {
     super(ctx, 'pluginShare')
     this.own = ctx
     this.dir = resolve(config.dir ?? join(ctx.appInstance.root, 'plugins'))
-    this.releases = config.releases ?? githubReleasesOverHttps()
+    this.releases = config.releases ?? releasesWithLoginFallback()
     this.download = config.download ?? httpsDownload()
+    this.registryIndex = config.registryIndex ?? REGISTRY_INDEX_URL
+    this.npmRegistry = config.npm ?? firstRegistryPort(npmRegistryOverHttps(), npmRegistryViaCli())
+    this.nativeWork = config.native ?? nativePorts()
     this.ports = config.publish ?? { host: githubCli(), git: gitCli() }
     // Removing a plugin removes its record. Listened to here, not asked of each caller: every way of removing it goes through extensions.
     ctx.on('extensions/changed', (name, change) => {
       if (change !== 'removed') return
       this.live.delete(name)
       this.remember(name, undefined)
+      this.dropNative(name)
     })
     // Not awaited by the app's start: a person offline still gets their app, and the warning says what is missing.
     this.restored = this.inTurn(() => this.restore())
@@ -369,6 +447,7 @@ export class PluginShare extends Service {
           'look at the new plan and say yes again',
         )
       }
+      if (plan.target === 'npm') return this.publishNpm(name, plan)
       const { home } = this.own.appInstance
       try {
         const shared = await sharePlugin(
@@ -443,12 +522,75 @@ export class PluginShare extends Service {
   }
 
   /** Fetch the remembered plugins whose folder is gone, exactly as recorded: other bytes are refused, and the record stays for the person to decide. */
+  private get places(): NativePlaces {
+    return { root: this.own.appInstance.root, home: this.own.appInstance.home }
+  }
+
+  /** Remember the native package an installed plugin brought; one it no longer brings (an update) goes. The result's `native` field. */
+  private keepNative(
+    name: string,
+    native: NativePackage | undefined,
+    before: NativePackage | undefined,
+    action: NativeAction | undefined,
+  ): Pick<Extract<PullResult, { ok: true }>, 'native'> {
+    if (
+      before !== undefined &&
+      (native === undefined ||
+        before.version !== native.version ||
+        before.package !== native.package)
+    )
+      this.dropNative(name)
+    if (native === undefined || action === undefined) return {}
+    this.natives.set(name, native)
+    return {
+      native: { package: native.package, version: native.version, size: native.size, action },
+    }
+  }
+
+  /** Take away the native package a removed plugin brought, unless another installed plugin brought the same one. */
+  private dropNative(name: string): void {
+    const native = this.natives.get(name)
+    if (native === undefined) return
+    this.natives.delete(name)
+    const shared = [...this.natives.values()].some(
+      (other) => other.package === native.package && other.version === native.version,
+    )
+    if (!shared) releaseNative(native, this.places)
+  }
+
+  /** A pulled plugin that is here again links its native package again: an `npm install` puts the placeholder back in its place. */
+  private async relinkNative(name: string): Promise<void> {
+    let manifest: Record<string, unknown>
+    try {
+      manifest = JSON.parse(readFileSync(join(this.dir, name, 'package.json'), 'utf8')) as Record<
+        string,
+        unknown
+      >
+    } catch {
+      return
+    }
+    const declared = nativesOf(manifest)
+    const native = 'natives' in declared ? nativeFor(declared.natives) : undefined
+    if (native === undefined) return
+    try {
+      await ensureNative(native, this.places, this.nativeWork)
+      this.natives.set(name, native)
+    } catch (cause) {
+      console.warn(
+        `plugin-share: ${name}'s ${native.package} was not installed again: ${reasonOf(cause)}`,
+      )
+    }
+  }
+
   private async restore(): Promise<readonly RestoreOutcome[]> {
     const file = join(this.own.appInstance.root, 'blend.yaml')
     if (!existsSync(file)) return []
     const outcomes: RestoreOutcome[] = []
     for (const [name, record] of Object.entries(pulledRecords(readFileSync(file, 'utf8')))) {
-      if (existsSync(join(this.dir, name))) continue
+      if (existsSync(join(this.dir, name))) {
+        await this.relinkNative(name)
+        continue
+      }
       const result = await this.pullNow(
         `${record.source}@sha256:${record.digest}`,
         record.integrity,
@@ -480,6 +622,7 @@ export class PluginShare extends Service {
         `this app has no plugin "${name}" in plugins/`,
         'name a folder of plugins/',
       )
+    if (options.to === 'npm') return this.planNpm(name, source, options)
     try {
       const { host } = this.ports
       const owner = options.owner ?? host.login()
@@ -533,8 +676,174 @@ export class PluginShare extends Service {
     }
   }
 
+  /**
+   * What publishing to npm would do, read without sending anything: the account is the person's own npm login (`npm whoami`), the package is
+   * `@<scope>/<name>` (the scope defaults to that account), and a version npm already has makes the plan name the next patch, as a GitHub release does.
+   */
+  private async planNpm(
+    name: string,
+    source: string,
+    options: PublishOptions,
+  ): Promise<PublishPlan | PublishRefused> {
+    const npm = this.ports.npm ?? npmWithLogin()
+    const registry = options.registry ?? NPM_REGISTRY
+    try {
+      const account = npm.login(registry)
+      const scope = (options.scope ?? account).replace(/^@/u, '').toLowerCase()
+      if (!NPM_SCOPE.test(scope))
+        return publishRefused(
+          `"${scope}" is not an npm scope`,
+          'write letters, digits and dashes, for example --scope acme',
+        )
+      const license = options.license ?? DEFAULT_LICENSE
+      if (!LICENSE_ID.test(license))
+        return publishRefused(
+          `"${license}" is not a license id`,
+          'write one such as MIT or Apache-2.0',
+        )
+      const packageName = `@${scope}/${name}`
+      const pack = (version?: string) => this.packNpm(source, name, packageName, license, version)
+      let packaged = await pack()
+      const released = npm.hasVersion(packageName, packaged.version, registry)
+        ? packaged.version
+        : undefined
+      if (released !== undefined) packaged = await pack(bumpVersion(released, 'patch'))
+      const secrets = findSecrets(
+        readTarball(packFolder(packaged.dir).tarball).map((file) => ({
+          path: file.path,
+          text: Buffer.from(file.content).toString('utf8'),
+        })),
+      )
+      if (secrets.length > 0) {
+        return publishRefused(
+          `the secret check found ${String(secrets.length)} possible secret(s) in ${secrets.map((secret) => secret.path).join(', ')}; nothing was sent`,
+          "take them out of the plugin and read them from the app's settings",
+        )
+      }
+      return {
+        target: 'npm',
+        package: packageName,
+        registry,
+        owner: scope,
+        repo: name,
+        version: packaged.version,
+        visibility: 'public',
+        license,
+        createsRepository: false,
+        ...(released === undefined ? {} : { released }),
+        files: packaged.files,
+        integrity: packaged.integrity,
+        digest: packaged.digest,
+        pullLine: npmPullLineOf(packageName, packaged.version, packaged.digest),
+      }
+    } catch (cause) {
+      return publishRefused(
+        reasonOf(cause),
+        'fix it, or sign in with: npm login (--registry <address> for another registry); nothing was sent',
+      )
+    }
+  }
+
+  /** The plugin as the npm package `packageName`: a package of its own folder, the same bytes whenever it is made again for the same version. */
+  private packNpm(
+    source: string,
+    name: string,
+    packageName: string,
+    license: string,
+    version?: string,
+  ) {
+    return packagePlugin(source, this.packages, name, `The ${name} Cordis plugin.`, {
+      release: { license },
+      packageName,
+      ...(version === undefined ? {} : { version }),
+    })
+  }
+
+  /** The confirmed npm plan, published with the person's own npm: the package is made again, and only the bytes that were planned are sent. */
+  private async publishNpm(name: string, plan: PublishPlan): Promise<PublishResult> {
+    const registry = plan.registry ?? NPM_REGISTRY
+    const packageName = plan.package ?? `@${plan.owner}/${plan.repo}`
+    try {
+      const packed = await this.packNpm(
+        join(this.dir, name),
+        name,
+        packageName,
+        plan.license,
+        plan.version,
+      )
+      if (packed.integrity !== plan.integrity)
+        return publishRefused(
+          `the package made now is not the one that was planned (${packageName} v${plan.version}); nothing was sent`,
+          'look at the new plan and say yes again',
+        )
+      ;(this.ports.npm ?? npmWithLogin()).publish(packed.tarball, registry, 'public')
+      const url =
+        registry === NPM_REGISTRY
+          ? `https://www.npmjs.com/package/${packageName}`
+          : `${registry.replace(/\/$/u, '')}/${packageName}`
+      return {
+        ok: true,
+        url,
+        releaseUrl: url,
+        version: packed.version,
+        integrity: packed.integrity,
+        digest: plan.digest,
+        pullLine: plan.pullLine,
+      }
+    } catch (cause) {
+      return publishRefused(
+        reasonOf(cause),
+        'look at the registry; part of this publish may have been sent',
+      )
+    }
+  }
+
+  /** A `registry:<id>` source turned into the release it lists, with the integrity the registry lists for it; any other source as it is. */
+  private async resolveRegistry(
+    input: string,
+    expectIntegrity?: string,
+  ): Promise<{ readonly input: string; readonly expectIntegrity?: string } | PullRefused> {
+    const text = input.trim()
+    if (!/^registry:/iu.test(text))
+      return { input, ...(expectIntegrity === undefined ? {} : { expectIntegrity }) }
+    // A digest written after the id (`registry:<id>@sha256:<digest>`) is not part of the id: it travels on to the release's source.
+    let named: ReturnType<typeof splitDigest>
+    try {
+      named = splitDigest(text)
+    } catch (cause) {
+      return refuse(
+        'source',
+        reasonOf(cause),
+        'write the 64 hex digits the plugin page shows after @sha256:',
+      )
+    }
+    let index: string
+    try {
+      index = Buffer.from(await this.download(this.registryIndex)).toString('utf8')
+    } catch (cause) {
+      return refuse(
+        'fetch',
+        `the registry could not be read: ${reasonOf(cause)}`,
+        'check the internet connection and pull again, or pull github:<owner>/<repo>',
+      )
+    }
+    const found = lookUpRegistry(index, named.source.slice('registry:'.length))
+    if (!found.ok) return refuse('source', found.reason, found.next)
+    return {
+      input:
+        named.digest === undefined
+          ? found.hit.source
+          : `${found.hit.source}@sha256:${named.digest}`,
+      expectIntegrity: expectIntegrity ?? found.hit.integrity,
+    }
+  }
+
   private async pullNow(input: string, expectIntegrity?: string): Promise<PullResult> {
     const { home, root } = this.own.appInstance
+    const resolved = await this.resolveRegistry(input, expectIntegrity)
+    if ('refusal' in resolved) return resolved
+    input = resolved.input
+    expectIntegrity = resolved.expectIntegrity
     let read: ReturnType<typeof readSource>
     try {
       read = readSource(input, root)
@@ -555,36 +864,99 @@ export class PluginShare extends Service {
           {
             store: new PluginStore(scratch),
             releases: this.releases,
+            registry: this.npmRegistry,
             download: this.download,
           },
           expectIntegrity === undefined ? {} : { expectIntegrity },
         )
       } catch (cause) {
+        const reason = reasonOf(cause)
         return refuse(
           'fetch',
-          reasonOf(cause),
-          'check the source with the person who released it; nothing was installed',
+          reason,
+          LIMITED.test(reason)
+            ? 'GitHub limits requests that are not signed in (60 an hour per address): sign in with `gh auth login`, or wait an hour, and run the same line again; nothing was installed'
+            : 'check the source with the person who released it; nothing was installed',
         )
       }
+      // An npm package is `@scope/name` and lives in the folder `name`; a package from any other source must already be named for a folder.
+      const folderIn = (packageName: string): string =>
+        read.source.kind === 'npm' ? folderOf(packageName) : packageName
       const files: PluginFile[] = readTarball(readFileSync(pulled.stored.path)).map(
         ({ path, content }) => ({ path, bytes: content, kind: 'file' }),
       )
       const refused = pullRefusal(pulled.manifest, files, {
         digest: read.digest,
-        nameFits: (name) => NAME.test(name),
+        nameFits: (name) => NAME.test(folderIn(name)),
         hasService: (service) => this.own.get(service as never) !== undefined,
       })
       if (refused !== undefined) return refused
+      const declared = nativesOf(pulled.manifest)
       return await this.install(
-        pulled.stored.name,
+        folderIn(pulled.stored.name),
         pulled.stored.version,
         pulled.stored.integrity,
         files,
         recordedSource(read.source, pulled.stored.version),
+        'natives' in declared ? nativeFor(declared.natives) : undefined,
       )
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }
+  }
+
+  /**
+   * What the folder holds once a newer release of its pulled plugin comes in, the person's own changes kept: the release they pulled is the base of a
+   * three-way merge (fetched again from where it came from, checked against its recorded integrity, unless the folder is untouched and is the base).
+   * Refused, and nothing written, when the release and the person changed the same lines.
+   */
+  private async planUpdate(
+    name: string,
+    before: PulledRecord,
+    held: string,
+    release: readonly PluginFile[],
+    target: string,
+  ): Promise<{ readonly mine: Tree; readonly merged: MergedTrees } | PullRefused> {
+    const mine = treeOf(pluginFiles(target))
+    let base = mine
+    if (held !== before.digest) {
+      const scratch = mkdtempSync(join(this.own.appInstance.home, 'plugin-base-'))
+      try {
+        const pulled = await pullPlugin(
+          readSource(before.source, this.own.appInstance.root).source,
+          {
+            store: new PluginStore(scratch),
+            releases: this.releases,
+            registry: this.npmRegistry,
+            download: this.download,
+          },
+          { expectIntegrity: before.integrity },
+        )
+        base = treeOf(
+          readTarball(readFileSync(pulled.stored.path)).map(({ path, content }) => ({
+            path,
+            bytes: content,
+            kind: 'file' as const,
+          })),
+        )
+      } catch (cause) {
+        return refuse(
+          'folder-exists',
+          `plugins/${name} has changes of your own, and the release it was pulled from could not be fetched to keep them: ${reasonOf(cause)}`,
+          `check the internet connection and pull again, or move plugins/${name} out of plugins/ and pull again`,
+        )
+      } finally {
+        rmSync(scratch, { recursive: true, force: true })
+      }
+    }
+    const merged = mergeTrees(base, mine, treeOf(release))
+    if (merged.conflicts.length > 0)
+      return refuse(
+        'folder-exists',
+        `plugins/${name} has changes of your own to ${merged.conflicts.join(', ')}, and the new release changes ${merged.conflicts.length === 1 ? 'it' : 'them'} too`,
+        `plugins/${name} is untouched: move it out of plugins/ and pull again, then bring your changes back by hand`,
+      )
+    return { mine, merged }
   }
 
   /** Put the files in `plugins/<name>/` and install them; whatever does not end running takes its folder with it. */
@@ -594,6 +966,7 @@ export class PluginShare extends Service {
     integrity: string,
     files: readonly PluginFile[],
     source: string | undefined,
+    native: NativePackage | undefined,
   ): Promise<PullResult> {
     const target = join(this.dir, name)
     const incoming = join(this.dir, `.pulling-${name}`)
@@ -609,30 +982,62 @@ export class PluginShare extends Service {
       const wrote = !existsSync(target)
       const before = this.recorded(name)
       const held = wrote ? undefined : digestFolder(target)
+      let update: { readonly mine: Tree; readonly merged: MergedTrees } | undefined
       if (held !== undefined && held !== digest) {
-        const holder = before === undefined ? 'made in this app' : `pulled from ${before.source}`
-        // Only an untouched pulled copy goes with `plugin remove`; anything else is someone's work, which the person moves themselves.
-        const next =
-          before !== undefined && held === before.digest
-            ? `keep it, or remove it (npm run acryl -- plugin remove ${name}) and pull again`
-            : `keep it, or move plugins/${name} out of plugins/ and pull again`
-        return refuse(
-          'folder-exists',
-          `plugins/${name} holds a different copy of this plugin, ${holder}`,
-          next,
-        )
+        // A newer release of the plugin pulled here updates it in place, the person's own changes kept; anything else in the folder is someone's work.
+        const sameRepo =
+          before !== undefined &&
+          source !== undefined &&
+          repoOf(before.source) !== undefined &&
+          repoOf(before.source) === repoOf(source)
+        if (before !== undefined && sameRepo && before.digest !== digest) {
+          const planned = await this.planUpdate(name, before, held, files, target)
+          if ('refusal' in planned) return planned
+          update = planned
+        } else {
+          const holder = before === undefined ? 'made in this app' : `pulled from ${before.source}`
+          // Only an untouched pulled copy goes with `plugin remove`; anything else is someone's work, which the person moves themselves.
+          const next =
+            before !== undefined && held === before.digest
+              ? `keep it, or remove it (npm run acryl -- plugin remove ${name}) and pull again`
+              : `keep it, or move plugins/${name} out of plugins/ and pull again`
+          return refuse(
+            'folder-exists',
+            `plugins/${name} holds a different copy of this plugin, ${holder}`,
+            next,
+          )
+        }
       }
       const liveBefore = this.live.get(name)
       this.live.set(name, digest)
       if (wrote) renameSync(incoming, target)
+      else if (update !== undefined) applyTree(target, update.mine, update.merged.files)
       // Remembered as the folder appears, before it is installed, so whoever sees the folder can tell it is these released bytes (the frame then does
       // not load the app again for a plugin the app installs live); a pull that does not end running puts back what was remembered before.
       const remembered = source !== undefined && this.remember(name, { source, integrity, digest })
+      // Installed before the plugin starts, so the plugin finds it; an install that does not end running takes back only what it added.
+      let nativeAction: NativeAction | undefined
+      const nativeBefore = this.natives.get(name)
       const undo = () => {
+        if (native !== undefined && (nativeAction === 'downloaded' || nativeAction === 'linked'))
+          releaseNative(native, this.places, nativeAction === 'linked')
         if (wrote) rmSync(target, { recursive: true, force: true })
+        else if (update !== undefined) applyTree(target, update.merged.files, update.mine)
         if (remembered) this.remember(name, before)
         if (liveBefore === undefined) this.live.delete(name)
         else this.live.set(name, liveBefore)
+      }
+      if (native !== undefined) {
+        try {
+          nativeAction = await ensureNative(native, this.places, this.nativeWork)
+        } catch (cause) {
+          undo()
+          return refuse(
+            'native',
+            `${native.package}@${native.version} (${Math.round(native.size / 1e6)} MB) could not be installed: ${reasonOf(cause)}`,
+            'check the internet connection and pull again; the plugin was not installed',
+          )
+        }
       }
       let result: Awaited<ReturnType<Context['extensions']['install']>>
       try {
@@ -663,6 +1068,10 @@ export class PluginShare extends Service {
         action: result.action,
         state: result.state,
         remembered,
+        ...(update === undefined || update.merged.kept.length === 0
+          ? {}
+          : { kept: update.merged.kept }),
+        ...this.keepNative(name, native, nativeBefore, nativeAction),
       }
     } finally {
       rmSync(incoming, { recursive: true, force: true })
