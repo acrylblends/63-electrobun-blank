@@ -146,9 +146,10 @@ const name = `ACRYL-Blends-Electrobun-${OS}-${arch}`
 const shipped = []
 for (const file of listing) {
   const from = join(artifacts, file)
-  if (statSync(from).isDirectory() || /update\.json$|checksum\.json$/u.test(file)) continue
-  const ext = file.endsWith('.tar.zst') ? '.tar.zst' : file.slice(file.lastIndexOf('.'))
-  const to = join(out, `${name}${ext}`)
+  // Only what a person downloads: the DMG on macOS, the Setup archive on Windows and Linux. The .tar.zst is Electrobun's update bundle.
+  if (statSync(from).isDirectory() || /update\.json$|checksum\.json$|\.tar\.zst$/u.test(file)) continue
+  const ext = /(\.tar\.gz|\.[a-z0-9]+)$/u.exec(file)?.[1] ?? ''
+  const to = join(out, `${name}${/-Setup/u.test(file) ? '-Setup' : ''}${ext}`)
   copyFileSync(from, to)
   shipped.push({ file: basename(to), bytes: statSync(to).size })
 }
