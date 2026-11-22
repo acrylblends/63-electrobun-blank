@@ -55,7 +55,7 @@ jobs:
   release:
     needs: pack
     # A platform Electrobun cannot build for yet must not hold the others back: publish what was packed.
-    if: always() && github.event_name == 'push'
+    if: ${{ !cancelled() && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
